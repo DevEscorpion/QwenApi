@@ -7,3 +7,4 @@ pydantic-settings
 orjson
 aiofiles
 python-multipart
+httpx[http2]
