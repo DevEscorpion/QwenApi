@@ -1,33 +1,3 @@
-#!/usr/bin/env python3
-"""
-Servidor API compatible con OpenAI para Qwen con soporte para pensamiento.
-OPTIMIZADO PARA BAJA LATENCIA Y ALTA CONCURRENCIA.
-
-- I/O totalmente asíncrono para no bloquear el servidor.
-- Pool de sesiones automático para reducir latencia.
-- Sistema avanzado de gestión de sesiones.
-- Soporte para cookies en base64 y token de autenticación.
-
-Levanta un servidor local en http://localhost:5001 que traduce las peticiones
-de la API de OpenAI al protocolo de Qwen.
-
-Modelos disponibles:
-- qwen-final: Modelo estándar sin razonamiento (solo respuesta final)
-- qwen-thinking: Modelo con proceso de razonamiento completo
-
-Requisitos:
-- pip install fastapi uvicorn httpx orjson python-dotenv uvloop httptools
-
-Ejecución:
-1. Configura las variables QWEN_AUTH_TOKEN o QWEN_COOKIES_JSON_B64 en el archivo .env
-2. Guarda el archivo como 'main_proxy.py'
-3. Ejecuta desde la terminal: uvicorn main_proxy:app --host 0.0.0.0 --port 5001 --loop uvloop --http httptools
-
-Configuración en clientes (Genie, CodeGPT, etc.):
-- API Endpoint / Base URL: http://localhost:5001/v1
-- API Key: Cualquier cosa (ej: "sk-12345")
-- Models: qwen-final (normal) o qwen-thinking (con razonamiento)
-"""
 import json
 import logging
 import time
@@ -91,9 +61,20 @@ process_cookies_and_extract_token(QWEN_COOKIES_JSON_B64)
 
 # --- CONSTANTES DE LA API QWEN ---
 QWEN_API_BASE_URL = "https://chat.qwen.ai/api/v2"
-QWEN_INTERNAL_MODEL = "qwen3-235b-a22b"
+
+# Modelos disponibles con sus configuraciones internas
+MODEL_CONFIGS = {
+    "qwen-final": {"internal_model_id": "qwen3-235b-a22b", "filter_phase": True},
+    "qwen-thinking": {"internal_model_id": "qwen3-235b-a22b", "filter_phase": False},
+    "qwen-coder-plus": {"internal_model_id": "qwen3-coder-plus", "filter_phase": True},
+    "qwen-coder-30b": {"internal_model_id": "qwen3-coder-30b-a3b-instruct", "filter_phase": True},
+}
+
+# Alias para compatibilidad
 MODEL_QWEN_FINAL = "qwen-final"
 MODEL_QWEN_THINKING = "qwen-thinking"
+MODEL_QWEN_CODER_PLUS = "qwen-coder-plus"
+MODEL_QWEN_CODER_30B = "qwen-coder-30b"
 
 QWEN_HEADERS = {
     "Accept": "application/json", "Accept-Language": "es-AR,es;q=0.7", "Authorization": QWEN_AUTH_TOKEN,
@@ -111,7 +92,7 @@ MIN_CHAT_ID_POOL_SIZE = 2
 MAX_CHAT_ID_POOL_SIZE = 5
 
 # --- INICIALIZACIÓN DE LA APP Y LOGGING ---
-app = FastAPI(title="Qwen Web API Proxy (Ultra Low Latency)", version="2.3.0")
+app = FastAPI(title="Qwen Web API Proxy (Ultra Low Latency)", version="2.4.0")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("QwenProxy")
 
@@ -134,8 +115,8 @@ class AdvancedSessionManager:
         self._session_pool: Dict[str, Dict[str, Any]] = {}
         self._client_sessions: Dict[str, Dict[str, str]] = {}
         self._available_sessions: Dict[str, asyncio.Queue] = {
-            MODEL_QWEN_FINAL: asyncio.Queue(maxsize=MAX_CHAT_ID_POOL_SIZE),
-            MODEL_QWEN_THINKING: asyncio.Queue(maxsize=MAX_CHAT_ID_POOL_SIZE)
+            model: asyncio.Queue(maxsize=MAX_CHAT_ID_POOL_SIZE) 
+            for model in MODEL_CONFIGS.keys()
         }
         self._stats = {"sessions_created": 0, "sessions_reused": 0, "clients_served": 0, "pool_hits": 0, "pool_misses": 0}
 
@@ -263,10 +244,11 @@ class AdvancedSessionManager:
             }
 
 # --- LÓGICA DE COMUNICACIÓN CON QWEN ---
-async def create_qwen_chat(client: httpx.AsyncClient) -> str | None:
+async def create_qwen_chat(client: httpx.AsyncClient, model: str) -> str | None:
     """Crea una nueva sesión de chat en Qwen y devuelve su ID. Usado por el pool."""
     url = f"{QWEN_API_BASE_URL}/chats/new"
-    payload = {"title": "Proxy Pool Chat", "models": [QWEN_INTERNAL_MODEL], "chat_mode": "normal", "chat_type": "t2t", "timestamp": int(time.time() * 1000)}
+    internal_model_id = MODEL_CONFIGS[model]["internal_model_id"]
+    payload = {"title": "Proxy Pool Chat", "models": [internal_model_id], "chat_mode": "normal", "chat_type": "t2t", "timestamp": int(time.time() * 1000)}
     try:
         response = await client.post(url, json=payload)
         response.raise_for_status()
@@ -281,14 +263,16 @@ async def create_qwen_chat(client: httpx.AsyncClient) -> str | None:
     except Exception:
         return None
 
-def _build_qwen_completion_payload(chat_id: str, message: OpenAIMessage) -> Dict[str, Any]:
+def _build_qwen_completion_payload(chat_id: str, message: OpenAIMessage, model: str) -> Dict[str, Any]:
     current_timestamp = int(time.time())
+    internal_model_id = MODEL_CONFIGS[model]["internal_model_id"]
+    
     return {
         "stream": True, "incremental_output": True, "chat_id": chat_id, "chat_mode": "normal",
-        "model": QWEN_INTERNAL_MODEL, "parent_id": None,
+        "model": internal_model_id, "parent_id": None,
         "messages": [{
             "fid": str(uuid.uuid4()), "parentId": None, "role": message.role, "content": message.content,
-            "user_action": "chat", "files": [], "timestamp": current_timestamp, "models": [QWEN_INTERNAL_MODEL],
+            "user_action": "chat", "files": [], "timestamp": current_timestamp, "models": [internal_model_id],
             "chat_type": "t2t", "feature_config": {"thinking_enabled": True, "output_schema": "phase", "thinking_budget": 81920},
             "extra": {"meta": {"subChatType": "t2t"}}, "sub_chat_type": "t2t",
         }],
@@ -308,7 +292,7 @@ async def optimized_stream_parser(
 ) -> AsyncGenerator[str, None]:
     """Parser optimizado para streaming de baja latencia"""
     url = f"{QWEN_API_BASE_URL}/chat/completions?chat_id={chat_id}"
-    payload = _build_qwen_completion_payload(chat_id, message)
+    payload = _build_qwen_completion_payload(chat_id, message, requested_model)
     request_headers = {**QWEN_HEADERS, "Referer": f"https://chat.qwen.ai/c/{chat_id}"}
     
     completion_id = f"chatcmpl-{uuid.uuid4()}"
@@ -340,8 +324,11 @@ async def optimized_stream_parser(
                             qwen_chunk = JSON_DESERIALIZER(json_data)
                             delta = qwen_chunk.get("choices", [{}])[0].get("delta", {})
                             
-                            # Filtrado rápido por fase
-                            if requested_model == MODEL_QWEN_FINAL and delta.get("phase") != "answer":
+                            # Filtrado por fase según configuración del modelo
+                            model_config = MODEL_CONFIGS.get(requested_model, {})
+                            filter_phase = model_config.get("filter_phase", True)
+                            
+                            if filter_phase and delta.get("phase") != "answer":
                                 continue
                                 
                             if content_chunk := delta.get("content"):
@@ -381,7 +368,7 @@ async def low_latency_pool_manager(client: httpx.AsyncClient, session_manager: A
     
     while True:
         try:
-            for model in [MODEL_QWEN_FINAL, MODEL_QWEN_THINKING]:
+            for model in MODEL_CONFIGS.keys():
                 queue = session_manager._available_sessions[model]
                 current_size = queue.qsize()
                 
@@ -391,7 +378,7 @@ async def low_latency_pool_manager(client: httpx.AsyncClient, session_manager: A
                     created = 0
                     
                     # Crear sesiones en paralelo para mayor velocidad
-                    create_tasks = [create_qwen_chat(client) for _ in range(num_to_create)]
+                    create_tasks = [create_qwen_chat(client, model) for _ in range(num_to_create)]
                     results = await asyncio.gather(*create_tasks, return_exceptions=True)
                     
                     for chat_id in results:
@@ -478,11 +465,12 @@ async def root():
     stats = await session_manager.get_detailed_stats()
     return JSONResponse(content={
         "service": "Qwen Proxy Server - Ultra Low Latency",
-        "version": "2.3.0", "status": "running",
-        "features": ["Async I/O", "Session Pooling", "Optimized Streaming", "Low Latency", "Cookie Auth Support"],
+        "version": "2.4.0", "status": "running",
+        "features": ["Async I/O", "Session Pooling", "Optimized Streaming", "Low Latency", "Cookie Auth Support", "Multi-Model Support"],
         "endpoints": {"models": "/v1/models", "chat": "/v1/chat/completions", "stats": "/stats"},
         "session_stats": stats,
-        "auth_method": "cookies" if QWEN_COOKIE_STRING else "token"
+        "auth_method": "cookies" if QWEN_COOKIE_STRING else "token",
+        "available_models": list(MODEL_CONFIGS.keys())
     })
 
 @app.get("/stats")
@@ -492,8 +480,14 @@ async def get_stats():
 @app.get("/v1/models")
 def list_models():
     model_data = [
-        {"id": MODEL_QWEN_FINAL, "object": "model", "created": int(time.time()), "owned_by": "qwen", "description": "Respuesta final."},
-        {"id": MODEL_QWEN_THINKING, "object": "model", "created": int(time.time()), "owned_by": "qwen", "description": "Proceso de razonamiento completo."},
+        {
+            "id": model_id, 
+            "object": "model", 
+            "created": int(time.time()), 
+            "owned_by": "qwen", 
+            "description": f"Modelo {model_id} - {'Solo respuesta final' if config.get('filter_phase', True) else 'Con proceso de razonamiento'}"
+        }
+        for model_id, config in MODEL_CONFIGS.items()
     ]
     return JSONResponse(content={"object": "list", "data": model_data})
 
@@ -513,13 +507,18 @@ async def low_latency_chat_completions(request: Request):
         req_data = JSON_DESERIALIZER(body)
         
         model = req_data.get("model", MODEL_QWEN_FINAL)
+        
+        # Validar que el modelo sea soportado
+        if model not in MODEL_CONFIGS:
+            raise HTTPException(status_code=400, detail=f"Modelo '{model}' no soportado. Modelos disponibles: {list(MODEL_CONFIGS.keys())}")
+        
         request_info = {"headers": dict(request.headers), "model": model}
         
         client = get_http_client()
         client_id, session_id = await session_manager.get_or_create_session(request_info, client)
         
         if session_id is None:
-            session_id = await create_qwen_chat(client)
+            session_id = await create_qwen_chat(client, model)
             if not session_id:
                 raise HTTPException(status_code=500, detail="No se pudo crear sesión en Qwen.")
             await session_manager.register_new_session(client_id, session_id, model)
@@ -607,7 +606,7 @@ if __name__ == "__main__":
     import uvicorn
     
     print("\n" + "="*80)
-    print("🚀 Qwen Proxy Server v2.3.0 - OPTIMIZADO PARA ULTRA BAJA LATENCIA")
+    print("🚀 Qwen Proxy Server v2.4.0 - OPTIMIZADO PARA ULTRA BAJA LATENCIA")
     print("="*80)
     print("\n✅ OPTIMIZACIONES ACTIVAS:")
     print("  ⚡ I/O Totalmente Asíncrono con uvloop")
@@ -620,8 +619,9 @@ if __name__ == "__main__":
     print(f"  • Token: {'✅ Disponible' if QWEN_AUTH_TOKEN else '❌ No disponible'}")
     print(f"  • Cookies: {'✅ Disponible' if QWEN_COOKIE_STRING else '❌ No disponible'}")
     print("\n🤖 MODELOS DISPONIBLES:")
-    print(f"  • {MODEL_QWEN_FINAL}: Modelo estándar (solo respuesta final)")
-    print(f"  • {MODEL_QWEN_THINKING}: Modelo con proceso de razonamiento completo")
+    for model_id, config in MODEL_CONFIGS.items():
+        thinking_status = "🚫 Sin pensamiento" if config["filter_phase"] else "💭 Con pensamiento"
+        print(f"  • {model_id}: {thinking_status}")
     print("\n🔗 ENDPOINTS:")
     print("  • GET  /                       - Información y estadísticas del servidor")
     print("  • GET  /stats                  - Estadísticas detalladas de sesiones")
