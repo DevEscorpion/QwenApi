@@ -523,7 +523,9 @@ async def low_latency_chat_completions(request: Request):
         if not req_data.get("messages"):
             raise HTTPException(status_code=400, detail="El campo 'messages' no puede estar vacío.")
         
-        last_message = req_data["messages"][-1]
+        # Convertir el último mensaje de dict a OpenAIMessage - CORRECCIÓN APPLICADA
+        last_message_dict = req_data["messages"][-1]
+        last_message = OpenAIMessage(**last_message_dict)
         
         if req_data.get("stream", False):
             generator = optimized_stream_parser(
@@ -536,13 +538,22 @@ async def low_latency_chat_completions(request: Request):
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                "X-Client-Session": client_id  # Para reutilización de sesión
             }
             
-            return StreamingResponse(
+            # Devolver sesión al pool después de completar el streaming
+            response = StreamingResponse(
                 generator, 
                 media_type="text/event-stream",
                 headers=headers
             )
+            
+            # Añadir callback para devolver la sesión al pool cuando termine la respuesta
+            @response.router.on_event("shutdown")
+            async def return_session_to_pool():
+                await session_manager.return_session_to_pool(session_id, model)
+                
+            return response
         else:
             # Modo no-streaming (para compatibilidad)
             full_content = []
@@ -558,15 +569,32 @@ async def low_latency_chat_completions(request: Request):
             await session_manager.return_session_to_pool(session_id, model)
             
             return JSONResponse(content={
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
-                "created": int(time.time()), "model": model,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(full_content)}, "finish_reason": "stop"}],
+                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}", 
+                "object": "chat.completion",
+                "created": int(time.time()), 
+                "model": model,
+                "choices": [{
+                    "index": 0, 
+                    "message": {
+                        "role": "assistant", 
+                        "content": "".join(full_content)
+                    }, 
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 0,  # Puedes calcular esto si es necesario
+                    "completion_tokens": len("".join(full_content).split()),
+                    "total_tokens": len("".join(full_content).split())
+                }
             })
             
     except HTTPException as e:
         raise e
     except Exception as e:
         logger.error(f"Error en el endpoint de chat: {e}")
+        # Asegurarse de devolver la sesión al pool incluso en caso de error
+        if 'session_id' in locals() and session_id:
+            await session_manager.return_session_to_pool(session_id, model)
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {e}")
 
 if __name__ == "__main__":
