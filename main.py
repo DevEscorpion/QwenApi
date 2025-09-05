@@ -1,3 +1,33 @@
+#!/usr/bin/env python3
+"""
+Servidor API compatible con OpenAI para Qwen con soporte para pensamiento.
+OPTIMIZADO PARA BAJA LATENCIA Y ALTA CONCURRENCIA.
+
+- I/O totalmente asíncrono para no bloquear el servidor.
+- Pool de sesiones automático para reducir latencia.
+- Sistema avanzado de gestión de sesiones.
+- Soporte para cookies en base64 y token de autenticación.
+
+Levanta un servidor local en http://localhost:5001 que traduce las peticiones
+de la API de OpenAI al protocolo de Qwen.
+
+Modelos disponibles:
+- qwen-final: Modelo estándar sin razonamiento (solo respuesta final)
+- qwen-thinking: Modelo con proceso de razonamiento completo
+
+Requisitos:
+- pip install fastapi uvicorn httpx orjson python-dotenv uvloop httptools
+
+Ejecución:
+1. Configura las variables QWEN_AUTH_TOKEN o QWEN_COOKIES_JSON_B64 en el archivo .env
+2. Guarda el archivo como 'main_proxy.py'
+3. Ejecuta desde la terminal: uvicorn main_proxy:app --host 0.0.0.0 --port 5001 --loop uvloop --http httptools
+
+Configuración en clientes (Genie, CodeGPT, etc.):
+- API Endpoint / Base URL: http://localhost:5001/v1
+- API Key: Cualquier cosa (ej: "sk-12345")
+- Models: qwen-final (normal) o qwen-thinking (con razonamiento)
+"""
 import json
 import logging
 import time
@@ -6,6 +36,7 @@ import asyncio
 import hashlib
 import re
 import os
+import base64
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple, List, AsyncGenerator
 from contextlib import asynccontextmanager
@@ -31,11 +62,32 @@ except ImportError:
 
 # --- CONFIGURACIÓN DE CREDENCIALES ---
 load_dotenv()
-QWEN_AUTH_TOKEN = os.getenv("QWEN_AUTH_TOKEN")
-QWEN_COOKIE = os.getenv("QWEN_COOKIE")
+QWEN_AUTH_TOKEN_FALLBACK = os.getenv("QWEN_AUTH_TOKEN", "")
+QWEN_COOKIES_JSON_B64 = os.getenv("QWEN_COOKIES_JSON_B64", "")
 
-if not QWEN_AUTH_TOKEN or not QWEN_COOKIE:
-    raise RuntimeError("Las variables de entorno QWEN_AUTH_TOKEN y QWEN_COOKIE deben estar definidas en un archivo .env.")
+# ---------- COOKIES / TOKEN ----------
+QWEN_AUTH_TOKEN: str = ""
+QWEN_COOKIE_STRING: str = ""
+
+def process_cookies_and_extract_token(b64_string: str | None):
+    global QWEN_AUTH_TOKEN, QWEN_COOKIE_STRING
+    if not b64_string:
+        print("[WARN] Cookies var not found → using fallback token")
+        QWEN_AUTH_TOKEN = QWEN_AUTH_TOKEN_FALLBACK
+        QWEN_COOKIE_STRING = ""
+        return
+    try:
+        cookies_list = JSON_DESERIALIZER(base64.b64decode(b64_string))
+        QWEN_COOKIE_STRING = "; ".join(f"{c['name']}={c['value']}" for c in cookies_list)
+        token_value = next((c.get("value", "") for c in cookies_list if c.get("name") == "token"), "")
+        QWEN_AUTH_TOKEN = f"Bearer {token_value}" if token_value else QWEN_AUTH_TOKEN_FALLBACK
+        print("✅ Cookies & token processed OK")
+    except Exception as e:
+        print(f"[ERROR] Cookie parse: {e}")
+        QWEN_AUTH_TOKEN = QWEN_AUTH_TOKEN_FALLBACK
+        QWEN_COOKIE_STRING = ""
+
+process_cookies_and_extract_token(QWEN_COOKIES_JSON_B64)
 
 # --- CONSTANTES DE LA API QWEN ---
 QWEN_API_BASE_URL = "https://chat.qwen.ai/api/v2"
@@ -45,11 +97,15 @@ MODEL_QWEN_THINKING = "qwen-thinking"
 
 QWEN_HEADERS = {
     "Accept": "application/json", "Accept-Language": "es-AR,es;q=0.7", "Authorization": QWEN_AUTH_TOKEN,
-    "bx-v": "2.5.31", "Content-Type": "application/json; charset=UTF-8", "Cookie": QWEN_COOKIE,
+    "bx-v": "2.5.31", "Content-Type": "application/json; charset=UTF-8", 
     "Origin": "https://chat.qwen.ai", "Referer": "https://chat.qwen.ai/",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
     "source": "web", "x-accel-buffering": "no",
 }
+
+# Añadir cookie string si está disponible
+if QWEN_COOKIE_STRING:
+    QWEN_HEADERS["Cookie"] = QWEN_COOKIE_STRING
 
 MIN_CHAT_ID_POOL_SIZE = 2
 MAX_CHAT_ID_POOL_SIZE = 5
@@ -423,9 +479,10 @@ async def root():
     return JSONResponse(content={
         "service": "Qwen Proxy Server - Ultra Low Latency",
         "version": "2.3.0", "status": "running",
-        "features": ["Async I/O", "Session Pooling", "Optimized Streaming", "Low Latency"],
+        "features": ["Async I/O", "Session Pooling", "Optimized Streaming", "Low Latency", "Cookie Auth Support"],
         "endpoints": {"models": "/v1/models", "chat": "/v1/chat/completions", "stats": "/stats"},
-        "session_stats": stats
+        "session_stats": stats,
+        "auth_method": "cookies" if QWEN_COOKIE_STRING else "token"
     })
 
 @app.get("/stats")
@@ -524,6 +581,10 @@ if __name__ == "__main__":
     print("  🔗 Conexiones HTTP/2 Persistentes")
     print("  ⚡ Parsing Optimizado con Regex Pre-compilado")
     print("  📊 Middleware de Monitoreo de Latencia")
+    print("  🍪 Soporte para autenticación por cookies")
+    print("\n🔐 MÉTODO DE AUTENTICACIÓN:")
+    print(f"  • Token: {'✅ Disponible' if QWEN_AUTH_TOKEN else '❌ No disponible'}")
+    print(f"  • Cookies: {'✅ Disponible' if QWEN_COOKIE_STRING else '❌ No disponible'}")
     print("\n🤖 MODELOS DISPONIBLES:")
     print(f"  • {MODEL_QWEN_FINAL}: Modelo estándar (solo respuesta final)")
     print(f"  • {MODEL_QWEN_THINKING}: Modelo con proceso de razonamiento completo")
