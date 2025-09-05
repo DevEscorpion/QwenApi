@@ -499,6 +499,10 @@ def list_models():
 
 @app.post("/v1/chat/completions")
 async def low_latency_chat_completions(request: Request):
+    session_id = None
+    model = MODEL_QWEN_FINAL
+    client_id = None
+    
     try:
         # Limpieza periódica de sesiones expiradas
         if time.time() % 300 < 1:
@@ -523,14 +527,20 @@ async def low_latency_chat_completions(request: Request):
         if not req_data.get("messages"):
             raise HTTPException(status_code=400, detail="El campo 'messages' no puede estar vacío.")
         
-        # Convertir el último mensaje de dict a OpenAIMessage - CORRECCIÓN APPLICADA
+        # Convertir el último mensaje de dict a OpenAIMessage
         last_message_dict = req_data["messages"][-1]
         last_message = OpenAIMessage(**last_message_dict)
         
         if req_data.get("stream", False):
-            generator = optimized_stream_parser(
-                client=client, chat_id=session_id, message=last_message, requested_model=model
-            )
+            async def streaming_generator():
+                try:
+                    async for chunk in optimized_stream_parser(
+                        client=client, chat_id=session_id, message=last_message, requested_model=model
+                    ):
+                        yield chunk
+                finally:
+                    # Devolver sesión al pool después de completar el streaming
+                    await session_manager.return_session_to_pool(session_id, model)
             
             # Headers para baja latencia en streaming
             headers = {
@@ -541,32 +551,25 @@ async def low_latency_chat_completions(request: Request):
                 "X-Client-Session": client_id  # Para reutilización de sesión
             }
             
-            # Devolver sesión al pool después de completar el streaming
-            response = StreamingResponse(
-                generator, 
+            return StreamingResponse(
+                streaming_generator(), 
                 media_type="text/event-stream",
                 headers=headers
             )
-            
-            # Añadir callback para devolver la sesión al pool cuando termine la respuesta
-            @response.router.on_event("shutdown")
-            async def return_session_to_pool():
-                await session_manager.return_session_to_pool(session_id, model)
-                
-            return response
         else:
             # Modo no-streaming (para compatibilidad)
             full_content = []
-            async for chunk in optimized_stream_parser(client, session_id, last_message, model):
-                if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                    try:
-                        chunk_data = JSON_DESERIALIZER(chunk[6:].strip())
-                        if "choices" in chunk_data and chunk_data["choices"][0]["delta"].get("content"):
-                            full_content.append(chunk_data["choices"][0]["delta"]["content"])
-                    except:
-                        pass
-            
-            await session_manager.return_session_to_pool(session_id, model)
+            try:
+                async for chunk in optimized_stream_parser(client, session_id, last_message, model):
+                    if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                        try:
+                            chunk_data = JSON_DESERIALIZER(chunk[6:].strip())
+                            if "choices" in chunk_data and chunk_data["choices"][0]["delta"].get("content"):
+                                full_content.append(chunk_data["choices"][0]["delta"]["content"])
+                        except:
+                            pass
+            finally:
+                await session_manager.return_session_to_pool(session_id, model)
             
             return JSONResponse(content={
                 "id": f"chatcmpl-{uuid.uuid4().hex[:12]}", 
@@ -582,18 +585,21 @@ async def low_latency_chat_completions(request: Request):
                     "finish_reason": "stop"
                 }],
                 "usage": {
-                    "prompt_tokens": 0,  # Puedes calcular esto si es necesario
+                    "prompt_tokens": 0,
                     "completion_tokens": len("".join(full_content).split()),
                     "total_tokens": len("".join(full_content).split())
                 }
             })
             
     except HTTPException as e:
+        # Devolver sesión al pool en caso de error
+        if session_id:
+            await session_manager.return_session_to_pool(session_id, model)
         raise e
     except Exception as e:
         logger.error(f"Error en el endpoint de chat: {e}")
-        # Asegurarse de devolver la sesión al pool incluso en caso de error
-        if 'session_id' in locals() and session_id:
+        # Devolver sesión al pool en caso de error
+        if session_id:
             await session_manager.return_session_to_pool(session_id, model)
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {e}")
 
