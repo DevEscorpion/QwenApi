@@ -1,3 +1,37 @@
+#!/usr/bin/env python3
+"""
+Servidor API compatible con OpenAI para Qwen con soporte para pensamiento.
+OPTIMIZADO PARA BAJA LATENCIA Y ALTA CONCURRENCIA.
+
+- I/O totalmente asíncrono para no bloquear el servidor.
+- Pool de sesiones automático para reducir latencia.
+- Sistema avanzado de gestión de sesiones.
+- Soporte para cookies en base64 y token de autenticación.
+
+Levanta un servidor local en http://localhost:5001 que traduce las peticiones
+de la API de OpenAI al protocolo de Qwen.
+
+Modelos disponibles:
+- qwen-standard: Modelo estándar sin razonamiento (solo respuesta final)
+- qwen-standard-thinking: Modelo estándar con proceso de razonamiento completo
+- qwen-coder: Modelo especializado en código (solo respuesta final)
+- qwen-coder-flash: Modelo especializado en código rápido (solo respuesta final)
+- qwen-max: Modelo premium máximo (solo respuesta final)
+- qwen-max-thinking: Modelo premium máximo con proceso de razonamiento
+
+Requisitos:
+- pip install fastapi uvicorn httpx orjson python-dotenv uvloop httptools
+
+Ejecución:
+1. Configura las variables QWEN_AUTH_TOKEN o QWEN_COOKIES_JSON_B64 en el archivo .env
+2. Guarda el archivo como 'main_proxy.py'
+3. Ejecuta desde la terminal: uvicorn main_proxy:app --host 0.0.0.0 --port 5001 --loop uvloop --http httptools
+
+Configuración en clientes (Genie, CodeGPT, etc.):
+- API Endpoint / Base URL: http://localhost:5001/v1
+- API Key: Cualquier cosa (ej: "sk-12345")
+- Models: qwen-standard, qwen-standard-thinking, qwen-coder, qwen-coder-flash, qwen-max, qwen-max-thinking
+"""
 import json
 import logging
 import time
@@ -64,17 +98,21 @@ QWEN_API_BASE_URL = "https://chat.qwen.ai/api/v2"
 
 # Modelos disponibles con sus configuraciones internas
 MODEL_CONFIGS = {
-    "qwen-final": {"internal_model_id": "qwen3-235b-a22b", "filter_phase": True},
-    "qwen-thinking": {"internal_model_id": "qwen3-235b-a22b", "filter_phase": False},
-    "qwen-coder-plus": {"internal_model_id": "qwen3-coder-plus", "filter_phase": True},
-    "qwen-coder-30b": {"internal_model_id": "qwen3-coder-30b-a3b-instruct", "filter_phase": True},
+    "qwen-standard": {"internal_model_id": "qwen3-235b-a22b", "filter_phase": True, "display_name": "Qwen3 Standard"},
+    "qwen-standard-thinking": {"internal_model_id": "qwen3-235b-a22b", "filter_phase": False, "display_name": "Qwen3 Standard (con pensamiento)"},
+    "qwen-coder": {"internal_model_id": "qwen3-coder-plus", "filter_phase": True, "display_name": "Qwen3 Coder"},
+    "qwen-coder-flash": {"internal_model_id": "qwen3-coder-30b-a3b-instruct", "filter_phase": True, "display_name": "Qwen3 Coder Flash"},
+    "qwen-max": {"internal_model_id": "qwen3-max-preview", "filter_phase": True, "display_name": "Qwen3 Max"},
+    "qwen-max-thinking": {"internal_model_id": "qwen3-max-preview", "filter_phase": False, "display_name": "Qwen3 Max (con pensamiento)"},
 }
 
 # Alias para compatibilidad
-MODEL_QWEN_FINAL = "qwen-final"
-MODEL_QWEN_THINKING = "qwen-thinking"
-MODEL_QWEN_CODER_PLUS = "qwen-coder-plus"
-MODEL_QWEN_CODER_30B = "qwen-coder-30b"
+MODEL_QWEN_STANDARD = "qwen-standard"
+MODEL_QWEN_STANDARD_THINKING = "qwen-standard-thinking"
+MODEL_QWEN_CODER = "qwen-coder"
+MODEL_QWEN_CODER_FLASH = "qwen-coder-flash"
+MODEL_QWEN_MAX = "qwen-max"
+MODEL_QWEN_MAX_THINKING = "qwen-max-thinking"
 
 QWEN_HEADERS = {
     "Accept": "application/json", "Accept-Language": "es-AR,es;q=0.7", "Authorization": QWEN_AUTH_TOKEN,
@@ -92,7 +130,7 @@ MIN_CHAT_ID_POOL_SIZE = 2
 MAX_CHAT_ID_POOL_SIZE = 5
 
 # --- INICIALIZACIÓN DE LA APP Y LOGGING ---
-app = FastAPI(title="Qwen Web API Proxy (Ultra Low Latency)", version="2.4.0")
+app = FastAPI(title="Qwen Web API Proxy (Ultra Low Latency)", version="2.5.0")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("QwenProxy")
 
@@ -138,7 +176,7 @@ class AdvancedSessionManager:
 
     async def get_or_create_session(self, request_info: dict, client: httpx.AsyncClient) -> Tuple[str, Optional[str]]:
         async with self._lock:
-            model = request_info.get("model", MODEL_QWEN_FINAL)
+            model = request_info.get("model", MODEL_QWEN_STANDARD)
             client_id = self._detect_returning_client(request_info)
             if not client_id:
                 client_id = self._generate_unique_client_id(request_info)
@@ -287,114 +325,6 @@ def _format_sse_chunk(data: BaseModel) -> str:
 DATA_PREFIX = re.compile(r'^data:\s*')
 DONE_MARKER = re.compile(r'^data:\s*\[DONE\]')
 
-async def optimized_stream_parser(
-    client: httpx.AsyncClient, chat_id: str, message: OpenAIMessage, requested_model: str
-) -> AsyncGenerator[str, None]:
-    """Parser optimizado para streaming de baja latencia"""
-    url = f"{QWEN_API_BASE_URL}/chat/completions?chat_id={chat_id}"
-    payload = _build_qwen_completion_payload(chat_id, message, requested_model)
-    request_headers = {**QWEN_HEADERS, "Referer": f"https://chat.qwen.ai/c/{chat_id}"}
-    
-    completion_id = f"chatcmpl-{uuid.uuid4()}"
-    created_timestamp = int(time.time())
-    
-    try:
-        async with client.stream("POST", url, json=payload, headers=request_headers) as response:
-            response.raise_for_status()
-            
-            buffer = ""
-            async for chunk in response.aiter_text():
-                buffer += chunk
-                lines = buffer.split('\n')
-                buffer = lines.pop() if lines else ""  # Guardar línea incompleta
-                
-                for line in lines:
-                    line = line.strip()
-                    if not line or DONE_MARKER.match(line):
-                        continue
-                    
-                    # Eliminar prefijo "data: " más eficientemente
-                    if line.startswith('data:'):
-                        json_data = DATA_PREFIX.sub('', line, count=1).strip()
-                        if not json_data:
-                            continue
-                            
-                        try:
-                            # Parseo directo sin validaciones adicionales
-                            qwen_chunk = JSON_DESERIALIZER(json_data)
-                            delta = qwen_chunk.get("choices", [{}])[0].get("delta", {})
-                            
-                            # Filtrado por fase según configuración del modelo
-                            model_config = MODEL_CONFIGS.get(requested_model, {})
-                            filter_phase = model_config.get("filter_phase", True)
-                            
-                            if filter_phase and delta.get("phase") != "answer":
-                                continue
-                                
-                            if content_chunk := delta.get("content"):
-                                openai_chunk = OpenAICompletionChunk(
-                                    id=completion_id, created=created_timestamp, model=requested_model,
-                                    choices=[OpenAIChunkChoice(delta=OpenAIChunkDelta(content=content_chunk))],
-                                )
-                                yield _format_sse_chunk(openai_chunk)
-                                
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            continue
-    
-    except Exception as e:
-        error_chunk = {"error": {"message": f"Proxy error: {str(e)}", "type": "proxy_error"}}
-        yield f"data: {json.dumps(error_chunk)}\n\n"
-        return
-    
-    # Chunk final
-    final_chunk = OpenAICompletionChunk(
-        id=completion_id, created=created_timestamp, model=requested_model,
-        choices=[OpenAIChunkChoice(delta=OpenAIChunkDelta(), finish_reason="stop")],
-    )
-    yield _format_sse_chunk(final_chunk)
-    yield "data: [DONE]\n\n"
-
-async def low_latency_pool_manager(client: httpx.AsyncClient, session_manager: AdvancedSessionManager):
-    """Gestor optimizado para baja latencia"""
-    # Pre-calentar conexiones HTTP
-    warmup_tasks = []
-    for _ in range(3):
-        warmup_tasks.append(client.get(f"{QWEN_API_BASE_URL}/chats/new"))
-    
-    try:
-        await asyncio.gather(*warmup_tasks, return_exceptions=True)
-    except Exception:
-        pass  # Ignorar errores de warm-up
-    
-    while True:
-        try:
-            for model in MODEL_CONFIGS.keys():
-                queue = session_manager._available_sessions[model]
-                current_size = queue.qsize()
-                
-                # Mantener el pool siempre lleno para respuesta inmediata
-                if current_size < MAX_CHAT_ID_POOL_SIZE:
-                    num_to_create = MAX_CHAT_ID_POOL_SIZE - current_size
-                    created = 0
-                    
-                    # Crear sesiones en paralelo para mayor velocidad
-                    create_tasks = [create_qwen_chat(client, model) for _ in range(num_to_create)]
-                    results = await asyncio.gather(*create_tasks, return_exceptions=True)
-                    
-                    for chat_id in results:
-                        if isinstance(chat_id, str) and chat_id:
-                            await session_manager.register_new_session(f"pool_{model}", chat_id, model)
-                            await session_manager.return_session_to_pool(chat_id, model)
-                            created += 1
-            
-            # Intervalo más corto para respuesta más rápida
-            await asyncio.sleep(2)
-            
-        except asyncio.CancelledError:
-            break
-        except Exception:
-            await asyncio.sleep(5)
-
 # --- GESTIÓN DEL CICLO DE VIDA DE LA APLICACIÓN ---
 app_state: Dict[str, Any] = {}
 session_manager = AdvancedSessionManager()
@@ -444,6 +374,47 @@ app.router.lifespan_context = lifespan
 def get_http_client() -> httpx.AsyncClient: 
     return app_state["http_client"]
 
+async def low_latency_pool_manager(client: httpx.AsyncClient, session_manager: AdvancedSessionManager):
+    """Gestor optimizado para baja latencia"""
+    # Pre-calentar conexiones HTTP
+    warmup_tasks = []
+    for _ in range(3):
+        warmup_tasks.append(client.get(f"{QWEN_API_BASE_URL}/chats/new"))
+    
+    try:
+        await asyncio.gather(*warmup_tasks, return_exceptions=True)
+    except Exception:
+        pass  # Ignorar errores de warm-up
+    
+    while True:
+        try:
+            for model in MODEL_CONFIGS.keys():
+                queue = session_manager._available_sessions[model]
+                current_size = queue.qsize()
+                
+                # Mantener el pool siempre lleno para respuesta inmediata
+                if current_size < MAX_CHAT_ID_POOL_SIZE:
+                    num_to_create = MAX_CHAT_ID_POOL_SIZE - current_size
+                    created = 0
+                    
+                    # Crear sesiones en paralelo para mayor velocidad
+                    create_tasks = [create_qwen_chat(client, model) for _ in range(num_to_create)]
+                    results = await asyncio.gather(*create_tasks, return_exceptions=True)
+                    
+                    for chat_id in results:
+                        if isinstance(chat_id, str) and chat_id:
+                            await session_manager.register_new_session(f"pool_{model}", chat_id, model)
+                            await session_manager.return_session_to_pool(chat_id, model)
+                            created += 1
+            
+            # Intervalo más corto para respuesta más rápida
+            await asyncio.sleep(2)
+            
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(5)
+
 # --- MIDDLEWARE DE LATENCIA ---
 @app.middleware("http")
 async def latency_middleware(request: Request, call_next):
@@ -465,7 +436,7 @@ async def root():
     stats = await session_manager.get_detailed_stats()
     return JSONResponse(content={
         "service": "Qwen Proxy Server - Ultra Low Latency",
-        "version": "2.4.0", "status": "running",
+        "version": "2.5.0", "status": "running",
         "features": ["Async I/O", "Session Pooling", "Optimized Streaming", "Low Latency", "Cookie Auth Support", "Multi-Model Support"],
         "endpoints": {"models": "/v1/models", "chat": "/v1/chat/completions", "stats": "/stats"},
         "session_stats": stats,
@@ -485,128 +456,254 @@ def list_models():
             "object": "model", 
             "created": int(time.time()), 
             "owned_by": "qwen", 
-            "description": f"Modelo {model_id} - {'Solo respuesta final' if config.get('filter_phase', True) else 'Con proceso de razonamiento'}"
+            "description": f"{config['display_name']} - {'Solo respuesta final' if config.get('filter_phase', True) else 'Con proceso de razonamiento'}"
         }
         for model_id, config in MODEL_CONFIGS.items()
     ]
     return JSONResponse(content={"object": "list", "data": model_data})
 
 @app.post("/v1/chat/completions")
-async def low_latency_chat_completions(request: Request):
+async def chat_completions(request: Request):
+    retry_count = 0
+    max_retries = 2
     session_id = None
-    model = MODEL_QWEN_FINAL
+    model = MODEL_QWEN_STANDARD
     client_id = None
     
-    try:
-        # Limpieza periódica de sesiones expiradas
-        if time.time() % 300 < 1:
-            await session_manager.cleanup_expired_sessions()
+    while retry_count <= max_retries:
+        try:
+            # Limpieza periódica
+            if time.time() % 300 < 1:
+                await session_manager.cleanup_expired_sessions()
 
-        # Leer y parsear el cuerpo lo más rápido posible
-        body = await request.body()
-        req_data = JSON_DESERIALIZER(body)
-        
-        model = req_data.get("model", MODEL_QWEN_FINAL)
-        
-        # Validar que el modelo sea soportado
-        if model not in MODEL_CONFIGS:
-            raise HTTPException(status_code=400, detail=f"Modelo '{model}' no soportado. Modelos disponibles: {list(MODEL_CONFIGS.keys())}")
-        
-        request_info = {"headers": dict(request.headers), "model": model}
-        
-        client = get_http_client()
-        client_id, session_id = await session_manager.get_or_create_session(request_info, client)
-        
-        if session_id is None:
-            session_id = await create_qwen_chat(client, model)
-            if not session_id:
-                raise HTTPException(status_code=500, detail="No se pudo crear sesión en Qwen.")
-            await session_manager.register_new_session(client_id, session_id, model)
-        
-        if not req_data.get("messages"):
-            raise HTTPException(status_code=400, detail="El campo 'messages' no puede estar vacío.")
-        
-        # Convertir el último mensaje de dict a OpenAIMessage
-        last_message_dict = req_data["messages"][-1]
-        last_message = OpenAIMessage(**last_message_dict)
-        
-        if req_data.get("stream", False):
-            async def streaming_generator():
-                try:
-                    async for chunk in optimized_stream_parser(
-                        client=client, chat_id=session_id, message=last_message, requested_model=model
-                    ):
-                        yield chunk
-                finally:
-                    # Devolver sesión al pool después de completar el streaming
-                    await session_manager.return_session_to_pool(session_id, model)
+            # Leer y parsear el cuerpo de forma optimizada
+            body = await request.body()
+            req_data = JSON_DESERIALIZER(body)
             
-            # Headers para baja latencia en streaming
-            headers = {
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-                "X-Client-Session": client_id  # Para reutilización de sesión
-            }
+            model = req_data.get("model", MODEL_QWEN_STANDARD)
             
-            return StreamingResponse(
-                streaming_generator(), 
-                media_type="text/event-stream",
-                headers=headers
-            )
-        else:
-            # Modo no-streaming (para compatibilidad)
-            full_content = []
-            try:
-                async for chunk in optimized_stream_parser(client, session_id, last_message, model):
-                    if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                        try:
-                            chunk_data = JSON_DESERIALIZER(chunk[6:].strip())
-                            if "choices" in chunk_data and chunk_data["choices"][0]["delta"].get("content"):
-                                full_content.append(chunk_data["choices"][0]["delta"]["content"])
-                        except:
-                            pass
-            finally:
-                await session_manager.return_session_to_pool(session_id, model)
+            # Validar que el modelo sea soportado
+            if model not in MODEL_CONFIGS:
+                raise HTTPException(status_code=400, detail=f"Modelo '{model}' no soportado. Modelos disponibles: {list(MODEL_CONFIGS.keys())}")
             
-            return JSONResponse(content={
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}", 
-                "object": "chat.completion",
-                "created": int(time.time()), 
-                "model": model,
-                "choices": [{
-                    "index": 0, 
-                    "message": {
-                        "role": "assistant", 
-                        "content": "".join(full_content)
-                    }, 
-                    "finish_reason": "stop"
-                }],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": len("".join(full_content).split()),
-                    "total_tokens": len("".join(full_content).split())
+            request_info = {"headers": dict(request.headers), "model": model, "user_agent": request.headers.get("user-agent", "unknown")}
+            
+            client = get_http_client()
+            client_id, session_id = await session_manager.get_or_create_session(request_info, client)
+            
+            if session_id is None:
+                session_id = await create_qwen_chat(client, model)
+                if not session_id:
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        logger.warning("⚠️ Fallo al crear sesión Qwen, reintentando...")
+                        continue
+                    raise HTTPException(status_code=500, detail="No se pudo crear sesión en Qwen.")
+                await session_manager.register_new_session(client_id, session_id, model)
+
+            logger.info(f"💬 Petición: Cliente={client_id}, Modelo={model}, Sesión={session_id[:8]}..., Thinking={'No' if MODEL_CONFIGS[model]['filter_phase'] else 'Sí'}")
+            
+            if not req_data.get("messages"):
+                raise HTTPException(status_code=400, detail="El campo 'messages' no puede estar vacío.")
+            
+            # Convertir el último mensaje
+            last_message_dict = req_data["messages"][-1]
+            last_message = OpenAIMessage(**last_message_dict)
+            
+            if req_data.get("stream", False):
+                async def stream_generator():
+                    try:
+                        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+                        created_time = int(time.time())
+                        
+                        url = f"{QWEN_API_BASE_URL}/chat/completions?chat_id={session_id}"
+                        payload = _build_qwen_completion_payload(session_id, last_message, model)
+                        request_headers = {**QWEN_HEADERS, "Referer": f"https://chat.qwen.ai/c/{session_id}"}
+                        
+                        async with client.stream("POST", url, json=payload, headers=request_headers) as response:
+                            response.raise_for_status()
+                            
+                            buffer = ""
+                            async for chunk in response.aiter_text():
+                                buffer += chunk
+                                lines = buffer.split('\n')
+                                buffer = lines.pop() if lines else ""
+                                
+                                for line in lines:
+                                    line = line.strip()
+                                    if not line or DONE_MARKER.match(line):
+                                        continue
+                                    
+                                    if line.startswith('data:'):
+                                        json_data = DATA_PREFIX.sub('', line, count=1).strip()
+                                        if not json_data:
+                                            continue
+                                            
+                                        try:
+                                            qwen_chunk = JSON_DESERIALIZER(json_data)
+                                            delta = qwen_chunk.get("choices", [{}])[0].get("delta", {})
+                                            
+                                            # Filtrado por fase según configuración del modelo
+                                            model_config = MODEL_CONFIGS.get(model, {})
+                                            filter_phase = model_config.get("filter_phase", True)
+                                            
+                                            if filter_phase and delta.get("phase") != "answer":
+                                                continue
+                                                
+                                            if content_chunk := delta.get("content"):
+                                                openai_chunk = {
+                                                    "id": completion_id,
+                                                    "object": "chat.completion.chunk",
+                                                    "created": created_time,
+                                                    "model": model,
+                                                    "choices": [{
+                                                        "index": 0,
+                                                        "delta": {"content": content_chunk},
+                                                        "finish_reason": None
+                                                    }]
+                                                }
+                                                yield f"data: {JSON_SERIALIZER(openai_chunk)}\n\n"
+                                                
+                                        except (json.JSONDecodeError, KeyError, IndexError):
+                                            continue
+                        
+                        # Chunk final
+                        final_chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_time,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop"
+                            }]
+                        }
+                        yield f"data: {JSON_SERIALIZER(final_chunk)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        logger.info(f"✅ Respuesta completada para sesión {session_id[:8]}...")
+                        
+                    except Exception as e:
+                        error_chunk = {"error": {"message": f"Proxy error: {str(e)}", "type": "proxy_error"}}
+                        yield f"data: {json.dumps(error_chunk)}\n\n"
+                    finally:
+                        # Devolver sesión al pool después de completar el streaming
+                        await session_manager.return_session_to_pool(session_id, model)
+                
+                # Headers para baja latencia en streaming
+                headers = {
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                    "X-Client-Session": client_id
                 }
-            })
+                
+                return StreamingResponse(
+                    stream_generator(),
+                    media_type="text/event-stream",
+                    headers=headers
+                )
+            else:
+                # Modo no-streaming
+                full_content = []
+                try:
+                    url = f"{QWEN_API_BASE_URL}/chat/completions?chat_id={session_id}"
+                    payload = _build_qwen_completion_payload(session_id, last_message, model)
+                    request_headers = {**QWEN_HEADERS, "Referer": f"https://chat.qwen.ai/c/{session_id}"}
+                    
+                    async with client.stream("POST", url, json=payload, headers=request_headers) as response:
+                        response.raise_for_status()
+                        
+                        buffer = ""
+                        async for chunk in response.aiter_text():
+                            buffer += chunk
+                            lines = buffer.split('\n')
+                            buffer = lines.pop() if lines else ""
+                            
+                            for line in lines:
+                                line = line.strip()
+                                if not line or DONE_MARKER.match(line):
+                                    continue
+                                
+                                if line.startswith('data:'):
+                                    json_data = DATA_PREFIX.sub('', line, count=1).strip()
+                                    if not json_data:
+                                        continue
+                                        
+                                    try:
+                                        qwen_chunk = JSON_DESERIALIZER(json_data)
+                                        delta = qwen_chunk.get("choices", [{}])[0].get("delta", {})
+                                        
+                                        # Filtrado por fase según configuración del modelo
+                                        model_config = MODEL_CONFIGS.get(model, {})
+                                        filter_phase = model_config.get("filter_phase", True)
+                                        
+                                        if filter_phase and delta.get("phase") != "answer":
+                                            continue
+                                            
+                                        if content_chunk := delta.get("content"):
+                                            full_content.append(content_chunk)
+                                            
+                                    except (json.JSONDecodeError, KeyError, IndexError):
+                                        continue
+                
+                finally:
+                    await session_manager.return_session_to_pool(session_id, model)
+                
+                final_response = "".join(full_content)
+                logger.info(f"✅ Respuesta no-streaming: {len(final_response)} caracteres")
+                
+                # Calcular tokens aproximados
+                prompt_tokens = sum(len(msg.get('content', '').split()) for msg in req_data.get("messages", []))
+                completion_tokens = len(final_response.split())
+                
+                return JSONResponse(content={
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": final_response
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens
+                    }
+                })
             
-    except HTTPException as e:
-        # Devolver sesión al pool en caso de error
-        if session_id:
-            await session_manager.return_session_to_pool(session_id, model)
-        raise e
-    except Exception as e:
-        logger.error(f"Error en el endpoint de chat: {e}")
-        # Devolver sesión al pool en caso de error
-        if session_id:
-            await session_manager.return_session_to_pool(session_id, model)
-        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {e}")
+            break
+            
+        except HTTPException as e:
+            # Devolver sesión al pool en caso de error
+            if session_id:
+                await session_manager.return_session_to_pool(session_id, model)
+            raise e
+        except Exception as e:
+            # Devolver sesión al pool en caso de error
+            if session_id:
+                await session_manager.return_session_to_pool(session_id, model)
+                
+            if retry_count < max_retries:
+                retry_count += 1
+                logger.warning(f"⚠️ Error en intento {retry_count}: {e}. Reintentando...")
+                await asyncio.sleep(1)
+                continue
+                
+            logger.error(f"❌ Error fatal después de {max_retries+1} intentos.", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Error interno del servidor: {e}")
 
 if __name__ == "__main__":
     import uvicorn
     
     print("\n" + "="*80)
-    print("🚀 Qwen Proxy Server v2.4.0 - OPTIMIZADO PARA ULTRA BAJA LATENCIA")
+    print("🚀 Qwen Proxy Server v2.5.0 - OPTIMIZADO PARA ULTRA BAJA LATENCIA")
     print("="*80)
     print("\n✅ OPTIMIZACIONES ACTIVAS:")
     print("  ⚡ I/O Totalmente Asíncrono con uvloop")
@@ -621,7 +718,7 @@ if __name__ == "__main__":
     print("\n🤖 MODELOS DISPONIBLES:")
     for model_id, config in MODEL_CONFIGS.items():
         thinking_status = "🚫 Sin pensamiento" if config["filter_phase"] else "💭 Con pensamiento"
-        print(f"  • {model_id}: {thinking_status}")
+        print(f"  • {model_id}: {config['display_name']} ({thinking_status})")
     print("\n🔗 ENDPOINTS:")
     print("  • GET  /                       - Información y estadísticas del servidor")
     print("  • GET  /stats                  - Estadísticas detalladas de sesiones")
