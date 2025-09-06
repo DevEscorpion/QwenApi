@@ -23,7 +23,7 @@ Requisitos:
 - pip install fastapi uvicorn httpx orjson python-dotenv uvloop httptools
 
 Ejecución:
-1. Configura las variables QWEN_AUTH_TOKEN o QWEN_COOKIES_JSON_B64 en el archivo .env
+1. Configura las variables QWEN_AUTH_TOKEN or QWEN_COOKIES_JSON_B64 en el archivo .env
 2. Guarda el archivo como 'main_proxy.py'
 3. Ejecuta desde la terminal: uvicorn main_proxy:app --host 0.0.0.0 --port 5001 --loop uvloop --http httptools
 
@@ -54,7 +54,7 @@ from dotenv import load_dotenv
 # --- Intenta usar orjson para un parseo JSON más rápido ---
 try:
     import orjson
-    def orjson_dumps(v, *, default):
+    def orjson_dumps(v, *, default=None):
         return orjson.dumps(v, default=default).decode()
     JSON_SERIALIZER = orjson_dumps
     JSON_DESERIALIZER = orjson.loads
@@ -206,7 +206,7 @@ class AdvancedSessionManager:
                     
                     self._client_sessions.setdefault(client_id, {})[model] = session_id
                     session_info = self._session_pool[session_id]
-                    session_info["client_id"] = client_id
+                    session_info["client_id":] = client_id
                     session_info["last_used"] = datetime.now()
                     session_info["usage_count"] += 1
                     
@@ -562,7 +562,7 @@ async def chat_completions(request: Request):
                                                         "finish_reason": None
                                                     }]
                                                 }
-                                                yield f"data: {JSON_SERIALIZER(openai_chunk)}\n\n"
+                                                yield f"data: {JSON_SERIALIZER(openai_chunk, default=str)}\n\n"
                                                 
                                         except (json.JSONDecodeError, KeyError, IndexError):
                                             continue
@@ -579,7 +579,7 @@ async def chat_completions(request: Request):
                                 "finish_reason": "stop"
                             }]
                         }
-                        yield f"data: {JSON_SERIALIZER(final_chunk)}\n\n"
+                        yield f"data: {JSON_SERIALIZER(final_chunk, default=str)}\n\n"
                         yield "data: [DONE]\n\n"
                         logger.info(f"✅ Respuesta completada para sesión {session_id[:8]}...")
                         
