@@ -1,37 +1,3 @@
-#!/usr/bin/env python3
-"""
-Servidor API compatible con OpenAI para Qwen con soporte para pensamiento.
-OPTIMIZADO PARA BAJA LATENCIA Y ALTA CONCURRENCIA.
-
-- I/O totalmente asíncrono para no bloquear el servidor.
-- Pool de sesiones automático para reducir latencia.
-- Sistema avanzado de gestión de sesiones.
-- Soporte para cookies en base64 y token de autenticación.
-
-Levanta un servidor local en http://localhost:5001 que traduce las peticiones
-de la API de OpenAI al protocolo de Qwen.
-
-Modelos disponibles:
-- qwen-standard: Modelo estándar sin razonamiento (solo respuesta final)
-- qwen-standard-thinking: Modelo estándar con proceso de razonamiento completo
-- qwen-coder: Modelo especializado en código (solo respuesta final)
-- qwen-coder-flash: Modelo especializado en código rápido (solo respuesta final)
-- qwen-max: Modelo premium máximo (solo respuesta final)
-- qwen-max-thinking: Modelo premium máximo con proceso de razonamiento
-
-Requisitos:
-- pip install fastapi uvicorn httpx orjson python-dotenv uvloop httptools
-
-Ejecución:
-1. Configura las variables QWEN_AUTH_TOKEN or QWEN_COOKIES_JSON_B64 en el archivo .env
-2. Guarda el archivo como 'main_proxy.py'
-3. Ejecuta desde la terminal: uvicorn main_proxy:app --host 0.0.0.0 --port 5001 --loop uvloop --http httptools
-
-Configuración en clientes (Genie, CodeGPT, etc.):
-- API Endpoint / Base URL: http://localhost:5001/v1
-- API Key: Cualquier cosa (ej: "sk-12345")
-- Models: qwen-standard, qwen-standard-thinking, qwen-coder, qwen-coder-flash, qwen-max, qwen-max-thinking
-"""
 import json
 import logging
 import time
