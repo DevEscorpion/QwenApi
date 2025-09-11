@@ -104,6 +104,8 @@ MODEL_CONFIGS = {
     "qwen-coder-flash": {"internal_model_id": "qwen3-coder-30b-a3b-instruct", "filter_phase": True, "display_name": "Qwen3 Coder Flash"},
     "qwen-max": {"internal_model_id": "qwen3-max-preview", "filter_phase": True, "display_name": "Qwen3 Max"},
     "qwen-max-thinking": {"internal_model_id": "qwen3-max-preview", "filter_phase": False, "display_name": "Qwen3 Max (con pensamiento)"},
+    "qwen3-next": {"internal_model_id": "qwen-plus-2025-09-11", "filter_phase": True, "display_name": "Qwen3 Next"},
+    "qwen3-next": {"internal_model_id": "qwen-plus-2025-09-11", "filter_phase": False, "display_name": "Qwen3 Max (con pensamiento)"},
 }
 
 # Alias para compatibilidad
