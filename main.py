@@ -105,7 +105,7 @@ MODEL_CONFIGS = {
     "qwen-max": {"internal_model_id": "qwen3-max-preview", "filter_phase": True, "display_name": "Qwen3 Max"},
     "qwen-max-thinking": {"internal_model_id": "qwen3-max-preview", "filter_phase": False, "display_name": "Qwen3 Max (con pensamiento)"},
     "qwen3-next": {"internal_model_id": "qwen-plus-2025-09-11", "filter_phase": True, "display_name": "Qwen3 Next"},
-    "qwen3-next": {"internal_model_id": "qwen-plus-2025-09-11", "filter_phase": False, "display_name": "Qwen3 Max (con pensamiento)"},
+    "qwen3-next-thinking": {"internal_model_id": "qwen-plus-2025-09-11", "filter_phase": False, "display_name": "Qwen3 Next (con pensamiento)"},
 }
 
 # Alias para compatibilidad
@@ -115,6 +115,8 @@ MODEL_QWEN_CODER = "qwen-coder"
 MODEL_QWEN_CODER_FLASH = "qwen-coder-flash"
 MODEL_QWEN_MAX = "qwen-max"
 MODEL_QWEN_MAX_THINKING = "qwen-max-thinking"
+MODEL_QWEN_NEXT = "qwen3-next"
+MODEL_QWEN_NEXT_THINKING = "qwen3-next-thinking"
 
 QWEN_HEADERS = {
     "Accept": "application/json", "Accept-Language": "es-AR,es;q=0.7", "Authorization": QWEN_AUTH_TOKEN,
